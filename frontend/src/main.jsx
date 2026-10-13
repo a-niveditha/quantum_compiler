@@ -1,82 +1,191 @@
-import React, {useState} from 'react';
-import {createRoot} from 'react-dom/client';
+import React, { useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
 import './styles.css';
 
-const initial = {
-  depth:{baseline:42, proposed:27},
-  swaps:{baseline:18, proposed:7},
-  gates:{baseline:103, proposed:76},
-  time:{baseline:0.42, proposed:0.81},
-  fidelity:{baseline:0.81, proposed:0.91},
-  state:{baseline:0.98, proposed:0.99}
+// metric id -> [label, better direction, formatter]
+const METRICS = {
+  swaps: ['SWAP gates', 'low', v => v],
+  depth: ['Circuit depth', 'low', v => v],
+  total_gates: ['Total gates', 'low', v => v],
+  estimated_fidelity: ['Estimated fidelity', 'high', v => v.toFixed(4)],
+  state_fidelity: ['State fidelity', 'high', v => v.toFixed(4)],
+  compile_time_s: ['Compile time', 'low', v => `${v < 0.1 ? v.toFixed(3) : v.toFixed(2)} s`],
 };
 
-const labels = [
-  ['depth','Circuit depth',''],
-  ['swaps','SWAP gates',''],
-  ['gates','Total gates',''],
-  ['time','Compilation time','s'],
-  ['fidelity','Estimated fidelity',''],
-  ['state','State fidelity','']
-];
+const GOOD = [217, 249, 108];   // --accent
+const BAD = [255, 122, 89];
+const mix = t => `rgb(${GOOD.map((g, i) => Math.round(g + (BAD[i] - g) * t)).join(',')})`;
 
-function App(){
-  const [circuit,setCircuit]=useState('QFT-5');
-  const [hardware,setHardware]=useState('8-Qubit Grid');
-  const [results,setResults]=useState(initial);
-  const [compiled,setCompiled]=useState(false);
+async function api(path, body) {
+  const res = await fetch(`/api/${path}`, body ? {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  } : undefined);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
 
-  const reduction=(b,p)=>((b-p)/b*100).toFixed(1);
-  const compile=()=>{setCompiled(true);};
+function App() {
+  const [options, setOptions] = useState(null);
+  const [circuit, setCircuit] = useState('dj');
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const loadOptions = () => {
+    setError(null);
+    api('options').then(setOptions).catch(() => setError('offline'));
+  };
+  useEffect(loadOptions, []);
+
+  const compile = async () => {
+    setLoading(true); setError(null);
+    try { setResult(await api('compile', { circuit })); }
+    catch (e) { setError(e.message === 'Failed to fetch' ? 'offline' : e.message); }
+    finally { setLoading(false); }
+  };
+
+  const info = options?.circuits.find(c => c.id === circuit);
+  const shown = result && result.circuit === circuit ? result : null;
 
   return <div className="page">
     <header className="topbar">
-      <div className="brand"><span className="orb">⚛</span><div><div className="title">QUANTUM COMPILER</div><div className="subtitle">Qubit Allocation &amp; Depth Minimisation</div></div></div>
-      <div className="status"><span></span> SYSTEM READY</div>
+      <div className="brand"><span className="orb">⚛</span><div>
+        <div className="title">QUANTUM COMPILER</div>
+        <div className="subtitle">GNN + RL qubit allocation and routing · FakeJakartaV2</div>
+      </div></div>
+      <div className={`status ${options ? '' : 'off'}`}><span></span>{options ? 'API CONNECTED' : 'API OFFLINE'}</div>
     </header>
 
     <main>
       <section className="hero">
         <div>
-          <p className="eyebrow">COMPILATION ANALYSIS</p>
-          <h1>Compare your <em>baseline</em> and proposed compiler.</h1>
-          <p className="muted">A clean comparison view for SABRE/QMAP baselines versus the GNN + RL approach.</p>
+          <p className="eyebrow">LIVE COMPILATION</p>
+          <h1>Compile a benchmark <em>live</em> and compare against SABRE.</h1>
+          <p className="muted">Pick one of the five MQT Bench circuits. The backend compiles it with all five
+            methods on the 7-qubit FakeJakartaV2 and checks every number against the published results.</p>
         </div>
         <div className="controls">
-          <label>CIRCUIT<select value={circuit} onChange={e=>setCircuit(e.target.value)}><option>QFT-5</option><option>GHZ-5</option><option>Grover-5</option><option>QFT-8</option></select></label>
-          <label>HARDWARE<select value={hardware} onChange={e=>setHardware(e.target.value)}><option>8-Qubit Grid</option><option>8-Qubit Linear</option></select></label>
-          <button onClick={compile}>{compiled ? 'COMPILED ✓' : 'COMPILE CIRCUIT'}</button>
+          <label>CIRCUIT
+            <select value={circuit} onChange={e => setCircuit(e.target.value)} disabled={!options || loading}>
+              {(options?.circuits ?? []).map(c => <option key={c.id} value={c.id}>{c.id} · {c.num_qubits} qubits</option>)}
+            </select>
+          </label>
+          <button onClick={compile} disabled={!options || loading}>{loading ? 'COMPILING…' : 'COMPILE CIRCUIT'}</button>
         </div>
       </section>
 
-      <section className="comparison card">
-        <div className="cardhead"><div><p className="eyebrow">RESULTS</p><h2>Baseline <span>vs</span> Proposed</h2></div><div className="badge">{circuit} · {hardware}</div></div>
-        <div className="table">
-          <div className="row head"><div></div><div>Baseline</div><div>Proposed</div><div>Improvement</div></div>
-          {labels.map(([key,label,suffix])=><div className="row" key={key}>
-            <div className="metric">{label}</div>
-            <div>{results[key].baseline}{suffix}</div>
-            <div className="proposed">{results[key].proposed}{suffix}</div>
-            <div className={(key==='time')?'neutral':'good'}>{key==='time'?`+${((results[key].proposed-results[key].baseline)/results[key].baseline*100).toFixed(1)}%`:`↓ ${reduction(results[key].baseline,results[key].proposed)}%`}</div>
-          </div>)}
-        </div>
-      </section>
+      {error === 'offline' && <section className="card notice">
+        <h2>Backend API not reachable</h2>
+        <p className="muted">From <code>backend/</code> with the venv active, run
+          <code>python -m uvicorn api.server:app --port 8000</code>, wait for "API ready", then
+          <button className="link" onClick={loadOptions}>retry</button>.</p>
+      </section>}
+      {error && error !== 'offline' && <section className="card notice"><h2>Compile failed</h2><p className="muted">{error}</p></section>}
 
-      <section className="grid2">
-        <div className="card compact"><div className="cardhead"><div><p className="eyebrow">DEPTH</p><h2>Circuit depth</h2></div><strong>{reduction(results.depth.baseline,results.depth.proposed)}% <small>reduction</small></strong></div><div className="bars"><div><span>Baseline</span><i style={{width:'100%'}}></i><b>{results.depth.baseline}</b></div><div><span>Proposed</span><i style={{width:`${results.depth.proposed/results.depth.baseline*100}%`}}></i><b>{results.depth.proposed}</b></div></div></div>
-        <div className="card compact"><div className="cardhead"><div><p className="eyebrow">SWAP OVERHEAD</p><h2>SWAP gates</h2></div><strong>{reduction(results.swaps.baseline,results.swaps.proposed)}% <small>reduction</small></strong></div><div className="bars"><div><span>Baseline</span><i style={{width:'100%'}}></i><b>{results.swaps.baseline}</b></div><div><span>Proposed</span><i style={{width:`${results.swaps.proposed/results.swaps.baseline*100}%`}}></i><b>{results.swaps.proposed}</b></div></div></div>
-      </section>
+      {info && <section className="card circuitinfo">
+        <div className="cardhead"><div><p className="eyebrow">CIRCUIT</p><h2>{info.id}</h2></div>
+          <div className="badge">{info.num_qubits} logical qubits · {info.two_qubit_gates} two-qubit gates</div></div>
+        <p className="muted">{info.description}</p>
+        <details><summary>Logical circuit</summary><pre className="drawing">{info.drawing}</pre></details>
+      </section>}
 
-      <section className="circuit card">
-        <div className="cardhead"><div><p className="eyebrow">VISUALISATION</p><h2>Compilation snapshot</h2></div><div className="legend"><span className="dot"></span> logical <span className="dot physical"></span> physical</div></div>
-        <div className="circuitbox">
-          <div className="circuitlabel">BASELINE</div><div className="wires"><span>q0 ─── H ─── ● ───────── X ───</span><span>q1 ───────── X ─── ● ───────</span><span>q2 ─────────────── X ────────</span></div>
-          <div className="divider"></div>
-          <div className="circuitlabel proposedlabel">PROPOSED · GNN + RL</div><div className="wires"><span>q0 ─── H ─── ● ──────────────</span><span>q1 ───── SWAP ─ X ─── ● ─────</span><span>q2 ────────────────── X ─────</span></div>
-        </div>
-      </section>
+      {loading && <section className="card loadingcard"><div className="spinner"></div>
+        <p className="muted">Running SABRE, QMAP, GNN scoring of 2,520 layouts, and both RL agents…</p></section>}
+
+      {shown && !loading && <Results result={shown} options={options} />}
     </main>
-    <footer>QUANTUM COMPILER · {new Date().getFullYear()} · RESULTS DASHBOARD</footer>
-  </div>
+    <footer>QUANTUM COMPILER · RESULTS FROM backend/evaluation/results · RL AGENTS: SEED 42</footer>
+  </div>;
 }
-createRoot(document.getElementById('root')).render(<App/>);
+
+function Results({ result, options }) {
+  const rows = result.results;
+  const checks = rows.flatMap(r => Object.values(r.metrics)).filter(m => m.matches !== null);
+  const matched = checks.filter(m => m.matches).length;
+
+  const best = {};
+  for (const [key, [, dir]] of Object.entries(METRICS)) {
+    const vals = rows.map(r => r.metrics[key].live);
+    const target = dir === 'low' ? Math.min(...vals) : Math.max(...vals);
+    best[key] = vals.every(v => Math.abs(v - vals[0]) < 1e-12) ? null : target;
+  }
+
+  return <>
+    <section className="summary">
+      <div className={`pill ${matched === checks.length ? 'ok' : 'warn'}`}>
+        {matched === checks.length ? '✓' : '!'} {matched}/{checks.length} values match the published results
+      </div>
+      <div className="pill">compiled in {result.total_seconds.toFixed(2)} s</div>
+    </section>
+
+    <section className="comparison card">
+      <div className="cardhead"><div><p className="eyebrow">RESULTS</p><h2>{result.circuit} <span>on</span> FakeJakartaV2</h2></div>
+        <div className="badge">best value per row highlighted</div></div>
+      <div className="table" style={{ '--cols': rows.length }}>
+        <div className="row head"><div></div>{rows.map(r => <div key={r.method} title={options.methods.find(m => m.id === r.method)?.description}>{r.label}</div>)}</div>
+        {Object.entries(METRICS).map(([key, [label, , fmt]]) => <div className="row" key={key}>
+          <div className="metric">{label}</div>
+          {rows.map(r => {
+            const m = r.metrics[key];
+            const isBest = best[key] !== null && Math.abs(m.live - best[key]) < 1e-12 && key !== 'compile_time_s';
+            return <div key={r.method} className={isBest ? 'best' : ''}>
+              {fmt(m.live)}
+              {m.matches !== null && <span className={`check ${m.matches ? 'yes' : 'no'}`}
+                title={m.matches ? `matches published value ${fmt(m.published)}` : `published: ${fmt(m.published)}`}>
+                {m.matches ? '✓' : '✗'}</span>}
+            </div>;
+          })}
+        </div>)}
+      </div>
+      <p className="footnote">✓ = identical to the CSV in evaluation/results (fidelity within 1e-9). Compile time is measured live and not compared.
+        GNN-based methods include scoring all 2,520 candidate layouts.</p>
+    </section>
+
+    <section className="card chips">
+      <div className="cardhead"><div><p className="eyebrow">QUBIT PLACEMENT</p><h2>Where each method put the circuit</h2></div>
+        <div className="legend"><span className="sw good"></span>low error <span className="sw bad"></span>high error</div></div>
+      <div className="chipgrid">{rows.map(r => <Chip key={r.method} row={r} device={options.device} />)}</div>
+      <p className="footnote">Coupler colour = two-qubit gate error (0.61%–1.34%); ring colour = readout error (1.6%–5.5%).
+        Filled qubits hold logical qubits q0–q4 at the start of the circuit.</p>
+    </section>
+
+    <section className="card drawings">
+      <div className="cardhead"><div><p className="eyebrow">OUTPUT</p><h2>Compiled circuits</h2></div></div>
+      {rows.map(r => <details key={r.method}><summary>{r.label} · {r.metrics.depth.live} depth · {r.metrics.total_gates.live} gates</summary>
+        <pre className="drawing">{r.drawing}</pre></details>)}
+    </section>
+  </>;
+}
+
+function Chip({ row, device }) {
+  const pos = q => [30 + q.x * 80, 30 + q.y * 80];
+  const byId = Object.fromEntries(device.qubits.map(q => [q.id, q]));
+  const cx = device.edges.map(e => e.cx_error), ro = device.qubits.map(q => q.readout_error);
+  const norm = (v, arr) => (v - Math.min(...arr)) / (Math.max(...arr) - Math.min(...arr));
+  const logicalAt = Object.fromEntries((row.layout ?? []).map((p, l) => [p, l]));
+  const used = row.layout ?? [];
+  const avgRO = used.length ? used.reduce((s, p) => s + byId[p].readout_error, 0) / used.length : null;
+
+  return <div className="chip">
+    <div className="chiphead"><b>{row.label}</b><span>{row.metrics.swaps.live} SWAP{row.metrics.swaps.live === 1 ? '' : 's'}</span></div>
+    <svg viewBox="0 0 220 220" role="img" aria-label={`${row.label} layout ${used.join(',')}`}>
+      {device.edges.map(e => {
+        const [x1, y1] = pos(byId[e.a]), [x2, y2] = pos(byId[e.b]);
+        return <line key={`${e.a}-${e.b}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={mix(norm(e.cx_error, cx))} strokeWidth="5" strokeLinecap="round" opacity="0.85">
+          <title>{`coupler ${e.a}-${e.b}: CX error ${(e.cx_error * 100).toFixed(2)}%`}</title></line>;
+      })}
+      {device.qubits.map(q => {
+        const [x, y] = pos(q), l = logicalAt[q.id];
+        return <g key={q.id}>
+          <circle cx={x} cy={y} r="19" fill={l !== undefined ? '#d9f96c' : '#141715'} stroke={mix(norm(q.readout_error, ro))} strokeWidth="4">
+            <title>{`physical Q${q.id}: readout error ${(q.readout_error * 100).toFixed(1)}%`}</title></circle>
+          <text x={x} y={y + 4} textAnchor="middle" className={l !== undefined ? 'logical' : 'phys'}>{l !== undefined ? `q${l}` : `Q${q.id}`}</text>
+        </g>;
+      })}
+    </svg>
+    <div className="chipfoot">{used.length ? <>layout [{used.join(', ')}] · avg readout {(avgRO * 100).toFixed(1)}%</> : 'layout unavailable'}
+      {row.extra?.gnn_rank && <> · GNN rank {row.extra.gnn_rank}</>}</div>
+  </div>;
+}
+
+createRoot(document.getElementById('root')).render(<App />);
