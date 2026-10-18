@@ -83,19 +83,31 @@ def evaluate_policy(method, policy, env, bench, pm, backend, layout_key):
     for name, (qc, task, layouts) in bench.items():
         candidates, layout_time = layouts[layout_key]
         t0 = time.perf_counter()
-        best = None
-        for rank, layout in enumerate(candidates, start=1):
-            swaps = policy(env, task, layout)
-            compiled = pm.run(env.routed_circuit())
-            key = (swaps, compiled.depth())
-            if best is None or key < best[0]:
-                best = (key, swaps, compiled, layout, rank, env.used_fallback)
+        best = route_candidates(policy, env, task, candidates, pm)
         dt = time.perf_counter() - t0 + layout_time
-        _, swaps, compiled, layout, rank, fallback = best
-        notes = f"layout={layout}" + (f" gnn_rank={rank}" if len(candidates) > 1 else "")
-        notes += "; shortest-path fallback used" if fallback else ""
-        rows.append(score(name, method, qc, compiled, swaps, dt, backend, notes))
+        notes = f"layout={best['layout']}" + (f" gnn_rank={best['rank']}" if len(candidates) > 1 else "")
+        notes += "; shortest-path fallback used" if best["fallback"] else ""
+        rows.append(score(name, method, qc, best["compiled"], best["swaps"], dt, backend, notes))
     return rows
+
+
+def route_candidates(policy, env, task, candidates, pm) -> dict:
+    """Route one circuit from each candidate layout and post-process it; return
+    the one with the fewest SWAPs (ties: lower depth, then earlier candidate)."""
+    best = None
+    for rank, layout in enumerate(candidates, start=1):
+        swaps = policy(env, task, layout)
+        compiled = pm.run(env.routed_circuit())
+        key = (swaps, compiled.depth())
+        if best is None or key < best["key"]:
+            best = {"key": key, "swaps": swaps, "compiled": compiled, "layout": list(layout),
+                    "rank": rank, "fallback": env.used_fallback}
+    return best
+
+
+def model_policy(model, masked):
+    """Wrap a trained SB3 model as policy(env, task, layout) -> swaps."""
+    return lambda env, task, layout: route(model, env, task, layout, masked)
 
 
 def greedy_policy(env, task, layout):
@@ -166,7 +178,7 @@ def main():
         model, masked = load_model(path)
         is_gnn_obs = "gnn_rl" in path.replace("\\", "/")
         base = ("RL_GNNobs_" if is_gnn_obs else "RL_") + os.path.basename(path).removesuffix(".zip")
-        policy = lambda e, t, l, m=model, k=masked: route(m, e, t, l, k)
+        policy = model_policy(model, masked)
         for key in layout_keys:
             rows += evaluate_policy(base + suffix(key), policy, gnn_env if is_gnn_obs else env,
                                     bench, pm, backend, key)

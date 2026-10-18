@@ -34,35 +34,51 @@ GNN_RESULTS_CSV = f"{RESULTS_DIR}/gnn_results.csv"
 TOP_K = 20
 
 
+# How each reported method picks among the routed shortlist.
+SELECTIONS = {
+    "GNN_layout+SABRE": (1, lambda c: (c["swaps"], c["depth"])),
+    f"GNN_top{TOP_K}+SABRE": (TOP_K, lambda c: (c["swaps"], c["depth"])),
+    f"GNN_top{TOP_K}_fid+SABRE": (TOP_K, lambda c: -c["estimated_fidelity"]),
+}
+
+
+def sabre_candidates(qc, backend, layouts) -> list[dict]:
+    """Route qc with SABRE (O3) from each fixed initial layout, in order."""
+    out = []
+    for rank, layout in enumerate(layouts, start=1):
+        compiled, route_time, swaps = run_sabre(qc, backend, initial_layout=layout)
+        out.append({"rank": rank, "layout": list(layout), "compiled": compiled, "swaps": swaps,
+                    "depth": compiled.depth(), "route_time": route_time,
+                    "estimated_fidelity": estimated_fidelity(compiled, backend)})
+    return out
+
+
+def select(method, candidates) -> tuple[dict, float]:
+    """(chosen candidate, routing seconds spent on the pool it was chosen from)."""
+    k, key = SELECTIONS[method]
+    pool = candidates[:k]
+    return min(pool, key=key), sum(c["route_time"] for c in pool)
+
+
 def main():
     backend = get_backend()
     selector = GNNLayoutSelector(backend)
     rows = []
     for name, qc in load_benchmark_circuits().items():
         layouts, predicted, score_time = selector.top_k(qc, TOP_K)
-        candidates = []
-        for layout in layouts:
-            compiled, route_time, swaps = run_sabre(qc, backend, initial_layout=layout)
-            fid = estimated_fidelity(compiled, backend)
-            candidates.append((swaps, compiled.depth(), route_time, layout, compiled, fid))
-        selections = (
-            ("GNN_layout+SABRE", candidates[:1], lambda c: (c[0], c[1])),
-            (f"GNN_top{TOP_K}+SABRE", candidates, lambda c: (c[0], c[1])),
-            (f"GNN_top{TOP_K}_fid+SABRE", candidates, lambda c: -c[5]),
-        )
-        for method, pool, key in selections:
-            swaps, depth, _, layout, compiled, _ = min(pool, key=key)
-            rank = candidates.index(next(c for c in pool if c[3] is layout)) + 1
-            sf, leak = state_fidelity_vs_ideal(qc, compiled)
+        candidates = sabre_candidates(qc, backend, layouts)
+        for method in SELECTIONS:
+            best, route_time = select(method, candidates)
+            sf, leak = state_fidelity_vs_ideal(qc, best["compiled"])
             rows.append({
                 "circuit": name, "method": method,
-                "depth": depth, "swaps": swaps,
-                "total_gates": total_gate_count(compiled),
-                "compile_time_s": score_time + sum(c[2] for c in pool),
-                "estimated_fidelity": estimated_fidelity(compiled, backend),
+                "depth": best["depth"], "swaps": best["swaps"],
+                "total_gates": total_gate_count(best["compiled"]),
+                "compile_time_s": score_time + route_time,
+                "estimated_fidelity": best["estimated_fidelity"],
                 "state_fidelity": sf, "leakage": leak,
-                "notes": f"layout={layout} gnn_rank={rank} predicted_swaps={predicted[rank - 1]:.2f} "
-                         f"scoring_s={score_time:.3f}",
+                "notes": f"layout={best['layout']} gnn_rank={best['rank']} "
+                         f"predicted_swaps={predicted[best['rank'] - 1]:.2f} scoring_s={score_time:.3f}",
             })
         print(f"{name:<11} top1: {rows[-3]['swaps']} swaps | top{TOP_K}: {rows[-2]['swaps']} swaps | "
               f"top{TOP_K} by fidelity: {rows[-1]['swaps']} swaps, est. fidelity {rows[-1]['estimated_fidelity']:.4f}")
@@ -72,8 +88,7 @@ def main():
     df.to_csv(GNN_RESULTS_CSV, index=False)
 
     full = pd.concat([pd.read_csv(BASELINE_CSV), df], ignore_index=True) if os.path.exists(BASELINE_CSV) else df
-    full = full[full["method"].isin(["SABRE", "MQT_QMAP", "GNN_layout+SABRE", f"GNN_top{TOP_K}+SABRE",
-                                     f"GNN_top{TOP_K}_fid+SABRE"])]
+    full = full[full["method"].isin(["SABRE", "MQT_QMAP", *SELECTIONS])]
     pd.set_option("display.width", 160)
     print("\n=== swaps per circuit ===")
     print(full.pivot(index="circuit", columns="method", values="swaps").to_string())
