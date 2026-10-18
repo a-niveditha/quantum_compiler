@@ -12,8 +12,8 @@ const METRICS = {
   compile_time_s: ['Compile time', 'low', v => `${v < 0.1 ? v.toFixed(3) : v.toFixed(2)} s`],
 };
 
-const GOOD = [217, 249, 108];   // --accent
-const BAD = [255, 122, 89];
+const GOOD = [78, 155, 101];   // low error: green
+const BAD = [214, 69, 69];     // high error: red
 const mix = t => `rgb(${GOOD.map((g, i) => Math.round(g + (BAD[i] - g) * t)).join(',')})`;
 
 async function api(path, body) {
@@ -177,7 +177,7 @@ function Chip({ row, device }) {
       {device.qubits.map(q => {
         const [x, y] = pos(q), l = logicalAt[q.id];
         return <g key={q.id}>
-          <circle cx={x} cy={y} r="19" fill={l !== undefined ? '#d9f96c' : '#141715'} stroke={mix(norm(q.readout_error, ro))} strokeWidth="4">
+          <circle cx={x} cy={y} r="19" className={l !== undefined ? 'node occupied' : 'node free'} stroke={mix(norm(q.readout_error, ro))} strokeWidth="4">
             <title>{`physical Q${q.id}: readout error ${(q.readout_error * 100).toFixed(1)}%`}</title></circle>
           <text x={x} y={y + 4} textAnchor="middle" className={l !== undefined ? 'logical' : 'phys'}>{l !== undefined ? `q${l}` : `Q${q.id}`}</text>
         </g>;
